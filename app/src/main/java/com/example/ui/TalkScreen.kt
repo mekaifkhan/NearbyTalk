@@ -107,15 +107,15 @@ fun TalkScreen(
 
     // Permissions resolution
     val requiredPermissions = remember {
-        val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        val list = mutableListOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             list.add(Manifest.permission.BLUETOOTH_SCAN)
             list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
             list.add(Manifest.permission.BLUETOOTH_CONNECT)
-            list.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        } else {
-            list.add(Manifest.permission.ACCESS_FINE_LOCATION)
-            list.add(Manifest.permission.ACCESS_COARSE_LOCATION)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             list.add(Manifest.permission.NEARBY_WIFI_DEVICES)
@@ -134,10 +134,25 @@ fun TalkScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        hasAllPermissions = results.values.all { it }
+        hasAllPermissions = requiredPermissions.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        }
         if (hasAllPermissions) {
             viewModel.startNearbyServices()
         }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasAllPermissions) {
+            permissionLauncher.launch(requiredPermissions)
+        }
+    }
+
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) {
+        hasAllPermissions = requiredPermissions.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        }
+        onPauseOrDispose {}
     }
 
     LaunchedEffect(hasAllPermissions) {

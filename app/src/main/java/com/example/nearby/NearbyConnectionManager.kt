@@ -1,9 +1,12 @@
 package com.example.nearby
 
+import android.Manifest
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.example.audio.AudioCaptureManager
 import com.example.audio.AudioPlaybackManager
 import com.example.protocol.NearbyPacket
@@ -99,12 +102,35 @@ class NearbyConnectionManager(
         return "nearby_talk_$sanitized"
     }
 
+    fun hasRequiredPermissions(): Boolean {
+        val permissions = mutableListOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+        return permissions.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
     fun checkRadioStatus(): String? {
+        if (!hasRequiredPermissions()) {
+            return "Permissions required: Please grant Location (Precise & Approximate), Nearby Devices, and Microphone."
+        }
+
         val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         val bluetoothAdapter = bluetoothManager?.adapter
 
         if (isEmulator && (bluetoothAdapter == null || !bluetoothAdapter.isEnabled)) {
-            return "Bluetooth radio is unavailable or disabled in this Android Emulator. Nearby Connections requires physical Bluetooth/Wi-Fi to broadcast and discover offline peers. Test between physical Android devices for live radio audio."
+            return "Bluetooth radio is unavailable or disabled in this Android Emulator. Physical Bluetooth & Wi-Fi are required for peer discovery. Test between physical Android phones."
         }
 
         if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled) {
@@ -283,6 +309,14 @@ class NearbyConnectionManager(
         localDisplayName = displayName
         currentChannel = channel
 
+        if (!hasRequiredPermissions()) {
+            val missingMsg = "Location & Nearby Devices permissions are required to start peer communication."
+            _radioError.value = missingMsg
+            scope.launch { _statusMessages.emit(missingMsg) }
+            Log.w(tag, "Cannot start services: $missingMsg")
+            return
+        }
+
         val hardwareIssue = checkRadioStatus()
         if (hardwareIssue != null) {
             _radioError.value = hardwareIssue
@@ -290,7 +324,6 @@ class NearbyConnectionManager(
             Log.w(tag, "Radio check warning: $hardwareIssue")
         }
 
-        // Stop any previous active operations cleanly before re-binding
         stopAdvertisingAndDiscovery()
 
         val serviceId = getServiceId(channel)
@@ -298,32 +331,48 @@ class NearbyConnectionManager(
             .setStrategy(Strategy.P2P_CLUSTER)
             .build()
 
-        connectionsClient.startAdvertising(
-            "$displayName ($localDeviceId)",
-            serviceId,
-            connectionLifecycleCallback,
-            advOptions
-        ).addOnSuccessListener {
-            _isAdvertising.value = true
-            _radioError.value = null
-            Log.i(tag, "Started advertising on $serviceId as $displayName")
+        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val bluetoothAdapter = bluetoothManager?.adapter
+        val canAdvertise = bluetoothAdapter != null && bluetoothAdapter.isEnabled &&
+                (bluetoothAdapter.isMultipleAdvertisementSupported || !isEmulator)
 
-            // Stagger discovery by 350ms to prevent BLE radio lock contention
-            scope.launch {
-                delay(350)
-                startDiscoveryInternal(serviceId)
+        if (canAdvertise) {
+            connectionsClient.startAdvertising(
+                "$displayName ($localDeviceId)",
+                serviceId,
+                connectionLifecycleCallback,
+                advOptions
+            ).addOnSuccessListener {
+                _isAdvertising.value = true
+                _radioError.value = null
+                Log.i(tag, "Started advertising on $serviceId as $displayName")
+
+                scope.launch {
+                    delay(350)
+                    startDiscoveryInternal(serviceId)
+                }
+            }.addOnFailureListener { e ->
+                handleRadioError("Advertising", e)
+                scope.launch {
+                    delay(400)
+                    startDiscoveryInternal(serviceId)
+                }
             }
-        }.addOnFailureListener { e ->
-            handleRadioError("Advertising", e)
-            // Even if advertising fails, attempt discovery in case central-only mode is supported
+        } else {
+            Log.i(tag, "Device advertising is unsupported or disabled; launching discovery directly")
             scope.launch {
-                delay(400)
+                delay(200)
                 startDiscoveryInternal(serviceId)
             }
         }
     }
 
     private fun startDiscoveryInternal(serviceId: String) {
+        if (!hasRequiredPermissions()) {
+            Log.w(tag, "Skipping discovery: permissions not granted")
+            return
+        }
+
         val discOptions = DiscoveryOptions.Builder()
             .setStrategy(Strategy.P2P_CLUSTER)
             .build()
@@ -348,20 +397,40 @@ class NearbyConnectionManager(
         if (phase == "Advertising") _isAdvertising.value = false
         if (phase == "Discovery") _isDiscovering.value = false
 
-        if (statusCode == ConnectionsStatusCodes.STATUS_RADIO_ERROR) {
-            val msg = if (isEmulator) {
-                "Bluetooth/Wi-Fi radios are simulated or offline in this Android Emulator (Status 8007). Physical Bluetooth & Wi-Fi are required for peer walkie-talkie networking. Test on two physical Android phones."
-            } else {
-                "Radio Error (8007): Bluetooth or Wi-Fi is disabled or busy. Please enable Bluetooth and Wi-Fi in Android Settings."
+        when (statusCode) {
+            8034, 8035 -> {
+                val msg = "Location permission (Approximate & Precise) is required for peer discovery."
+                _radioError.value = msg
+                scope.launch { _statusMessages.emit(msg) }
             }
-            _radioError.value = msg
-            scope.launch { _statusMessages.emit(msg) }
-        } else if (statusCode == ConnectionsStatusCodes.STATUS_ALREADY_ADVERTISING) {
-            _isAdvertising.value = true
-        } else if (statusCode == ConnectionsStatusCodes.STATUS_ALREADY_DISCOVERING) {
-            _isDiscovering.value = true
-        } else {
-            scope.launch { _statusMessages.emit("$phase failed: ${e.localizedMessage ?: e.message}") }
+            8036 -> {
+                val msg = "Microphone permission is required for voice transmission."
+                _radioError.value = msg
+                scope.launch { _statusMessages.emit(msg) }
+            }
+            8037, 8038, 8039, 8040 -> {
+                val msg = "Nearby Devices permission is required to discover local peers."
+                _radioError.value = msg
+                scope.launch { _statusMessages.emit(msg) }
+            }
+            ConnectionsStatusCodes.STATUS_RADIO_ERROR -> {
+                val msg = if (isEmulator) {
+                    "Bluetooth/Wi-Fi radios are simulated or offline in this Android Emulator (Status 8007). Physical Bluetooth & Wi-Fi are required for peer walkie-talkie networking. Test on two physical Android phones."
+                } else {
+                    "Radio Error (8007): Bluetooth or Wi-Fi is disabled or busy. Please enable Bluetooth and Wi-Fi in Android Settings."
+                }
+                _radioError.value = msg
+                scope.launch { _statusMessages.emit(msg) }
+            }
+            ConnectionsStatusCodes.STATUS_ALREADY_ADVERTISING -> {
+                _isAdvertising.value = true
+            }
+            ConnectionsStatusCodes.STATUS_ALREADY_DISCOVERING -> {
+                _isDiscovering.value = true
+            }
+            else -> {
+                scope.launch { _statusMessages.emit("$phase failed: ${e.localizedMessage ?: e.message}") }
+            }
         }
     }
 
