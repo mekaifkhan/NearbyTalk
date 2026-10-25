@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Nearby Talk</string>
+    <string name="channel_default">General</string>
+    <string name="hold_to_talk">HOLD TO TALK</string>
+    <string name="release_to_listen">RELEASE TO LISTEN</string>
+    <string name="status_ready">READY TO TRANSMIT</string>
+    <string name="status_transmitting">TRANSMITTING AUDIO…</string>
+    <string name="status_receiving">INCOMING TRANSMISSION…</string>
+    <string name="status_floor_busy">CHANNEL IN USE</string>
+</resources>

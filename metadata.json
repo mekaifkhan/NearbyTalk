@@ -1,0 +1,6 @@
+{
+  "name": "Nearby Talk",
+  "description": "Offline-first nearby multi-user walkie-talkie powered by Google Nearby Connections",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
